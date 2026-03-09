@@ -1913,60 +1913,19 @@ kbd {
       // ── Worker-scored records (combined predictions vs actuals) ──
       const workerScores = scoresJson.scores || [];
 
-      // ── GFS hindcast fallback for days with no combined prediction ──
-      const scoredDates = new Set(workerScores.map(s => s.date));
-      const unscoredDates = Object.keys(actualByDay).filter(d => !scoredDates.has(d));
-
-      let hindcastByDay = {};
-      if (unscoredDates.length > 0) {
-        try {
-          const hindcastRes = await safeFetch(
-            `${API_BASE}?latitude=${LAT}&longitude=${LON}&hourly=wind_speed_10m&wind_speed_unit=kn&timezone=${encodeURIComponent(TZ)}&past_days=30&forecast_days=0&models=gfs_seamless`,
-            { timeout: 15000 }
-          );
-          const hindcastJson = await hindcastRes.json();
-          if (hindcastJson.hourly && hindcastJson.hourly.time) {
-            for (let i = 0; i < hindcastJson.hourly.time.length; i++) {
-              const t = hindcastJson.hourly.time[i];
-              const date = t.slice(0, 10);
-              const hour = parseInt(t.slice(11, 13));
-              if (hour < NOON || hour > FIVE_PM) continue;
-              const spd = hindcastJson.hourly.wind_speed_10m[i];
-              if (spd == null) continue;
-              if (!hindcastByDay[date]) hindcastByDay[date] = [];
-              hindcastByDay[date].push(spd);
-            }
-          }
-        } catch (_) {}
-      }
-
-      // ── Build final records list ──
+      // ── Build final records list (worker-scored combined predictions only) ──
       const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: TZ });
       const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
       const monNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
       const records = [];
 
-      // 1. Worker-scored combined predictions
+      // Worker-scored combined predictions vs station actuals
       for (const s of workerScores) {
         records.push({
           date: s.date, predicted: s.predicted, actualAvg: s.actualAvg, actualMax: s.actualMax,
           error: s.error, pctError: s.pctError, source: 'combined',
           inProgress: false,
-        });
-      }
-
-      // 2. GFS hindcast fallback for remaining days
-      for (const date of unscoredDates) {
-        const actual = actualByDay[date];
-        if (!hindcastByDay[date] || hindcastByDay[date].length < 3) continue;
-        const hSpeeds = hindcastByDay[date];
-        const predicted = Math.round(hSpeeds.reduce((a, b) => a + b, 0) / hSpeeds.length);
-        const error = predicted - actual.avg;
-        const pctError = actual.avg > 0 ? Math.round((Math.abs(error) / actual.avg) * 100) : null;
-        records.push({
-          date, predicted, actualAvg: actual.avg, actualMax: actual.max,
-          error, pctError, source: 'GFS raw', inProgress: actual.inProgress ?? false,
         });
       }
 
@@ -2023,12 +1982,8 @@ kbd {
         const pctWithin3 = Math.round((within3 / records.length) * 100);
         const rmse = Math.sqrt(errors.reduce((a, e) => a + e * e, 0) / errors.length);
 
-        const combined = records.filter(r => r.source === 'combined');
-        const raw = records.filter(r => r.source !== 'combined');
-
         const biasColor = Math.abs(meanError) <= 2 ? 'var(--green)' : Math.abs(meanError) <= 4 ? 'var(--amber)' : 'var(--red)';
         const maeColor = mae <= 3 ? 'var(--green)' : mae <= 5 ? 'var(--accent)' : mae <= 7 ? 'var(--amber)' : 'var(--red)';
-
         summaryHtml = `<div class="acc-summary">
           <div class="acc-stat">
             <div class="acc-stat-val" style="color:${biasColor}">${meanError > 0 ? '+' : ''}${meanError.toFixed(1)}</div>
@@ -2050,11 +2005,7 @@ kbd {
             <div class="acc-stat-val" style="color:var(--text)">${records.length}</div>
             <div class="acc-stat-lbl">Days Tracked</div>
           </div>
-        </div>
-        ${combined.length > 0 && raw.length > 0 ? `<div style="font-family:'DM Mono',monospace;font-size:0.42rem;color:var(--muted);text-align:center;margin-top:0.4rem">
-          Combined forecast: ${combined.length} days, MAE ${(combined.map(r=>Math.abs(r.error)).reduce((a,b)=>a+b,0)/combined.length).toFixed(1)} kts · 
-          GFS raw: ${raw.length} days, MAE ${(raw.map(r=>Math.abs(r.error)).reduce((a,b)=>a+b,0)/raw.length).toFixed(1)} kts
-        </div>` : ''}`;
+        </div>`;
       }
 
       content.innerHTML = `<div class="acc-grid loaded">${tiles}</div>${summaryHtml}
@@ -2064,7 +2015,7 @@ kbd {
       stat.textContent = `✓ ${records.length} days scored`;
       stat.className = 'ok';
 
-      debugLog('accuracy', { totalRecords: records.length, workerScored: workerScores.length, gfsFallback: records.filter(r => r.source === 'GFS raw').length, stationDays: Object.keys(actualByDay).length });
+      debugLog('accuracy', { totalRecords: records.length, workerScored: workerScores.length, stationDays: Object.keys(actualByDay).length });
 
     } catch (e) {
       debugLog('accuracy-error', e.message);
